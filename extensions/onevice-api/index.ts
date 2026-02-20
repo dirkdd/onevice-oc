@@ -9,11 +9,21 @@ import {
   createUpdateAgentHandler,
   createDeleteAgentHandler,
 } from "./src/routes.js";
+import { getAllGraphTools } from "../../src/onevice/tools/graph-tools.js";
+import { getAllBidTools } from "../../src/onevice/tools/bid-tools.js";
+import { getAllFolkTools } from "../../src/onevice/tools/folk-crm.js";
 
 export default function register(api: OpenClawPluginApi) {
   const logger = api.logger;
 
   logger.info("[onevice-api] Registering OneVice intelligence API routes");
+
+  // Register all OneVice tools so they're available to standard OpenClaw agents too
+  const allTools = [...getAllGraphTools(), ...getAllBidTools(), ...getAllFolkTools()];
+  for (const tool of allTools) {
+    api.registerTool(tool);
+  }
+  logger.info(`[onevice-api] Registered ${allTools.length} OneVice tools`);
 
   // POST /onevice/query — Route query to agent orchestrator
   api.registerHttpRoute({

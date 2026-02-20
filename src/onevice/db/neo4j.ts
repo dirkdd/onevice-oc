@@ -1,7 +1,7 @@
 // Neo4j client for OneVice intelligence layer
 // Connects to Neo4j Aura for graph queries (persons, orgs, projects, collaborations)
 
-import neo4j, { type Driver, type Session, type Result } from "neo4j-driver";
+import neo4j, { type Driver, type Session } from "neo4j-driver";
 
 let driver: Driver | null = null;
 
@@ -33,10 +33,10 @@ export async function executeRead<T>(
 ): Promise<T[]> {
   const session = getSession();
   try {
-    const result: Result = await session.executeRead((tx) =>
+    const result = await session.executeRead((tx) =>
       tx.run(query, params),
     );
-    return result.records.map((r) => r.toObject() as T);
+    return result.records.map((r: InstanceType<typeof neo4j.types.Record>) => r.toObject() as T);
   } finally {
     await session.close();
   }
@@ -48,10 +48,10 @@ export async function executeWrite<T>(
 ): Promise<T[]> {
   const session = getSession();
   try {
-    const result: Result = await session.executeWrite((tx) =>
+    const result = await session.executeWrite((tx) =>
       tx.run(query, params),
     );
-    return result.records.map((r) => r.toObject() as T);
+    return result.records.map((r: InstanceType<typeof neo4j.types.Record>) => r.toObject() as T);
   } finally {
     await session.close();
   }

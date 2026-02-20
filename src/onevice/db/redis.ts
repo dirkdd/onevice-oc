@@ -1,7 +1,7 @@
 // Redis client for OneVice intelligence layer
 // Used for caching, rate limiting, and session state
 
-import Redis from "ioredis";
+import { Redis } from "ioredis";
 
 const KEY_PREFIX = "onevice:";
 let client: Redis | null = null;
