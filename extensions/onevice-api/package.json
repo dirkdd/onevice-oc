@@ -1,0 +1,15 @@
+{
+  "name": "@openclaw/onevice-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OneVice intelligence API plugin — exposes HTTP routes for Python backend integration",
+  "type": "module",
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

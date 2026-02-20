@@ -1,0 +1,15 @@
+{
+  "id": "onevice-api",
+  "name": "OneVice Intelligence API",
+  "description": "HTTP API routes for OneVice Python backend to delegate intelligence queries, agent CRUD, and health checks.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "serviceKey": {
+        "type": "string",
+        "description": "Shared secret for authenticating requests from the Python backend (X-Service-Key header)"
+      }
+    }
+  }
+}
