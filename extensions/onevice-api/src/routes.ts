@@ -3,6 +3,7 @@ import type { PluginLogger } from "../../../src/plugins/types.js";
 import {
   validateServiceKey,
   parseUserContext,
+  getUserIdFromRequest,
   sendUnauthorized,
   sendJson,
   sendError,
@@ -14,6 +15,14 @@ import type { AgentType, DataSensitivityLevel, UserRole } from "../../../src/one
 import { getAllGraphTools } from "../../../src/onevice/tools/graph-tools.js";
 import { getAllBidTools } from "../../../src/onevice/tools/bid-tools.js";
 import { getAllFolkTools } from "../../../src/onevice/tools/folk-crm.js";
+import {
+  listUserAgents,
+  getUserAgent,
+  createUserAgent,
+  updateUserAgent,
+  deactivateUserAgent,
+} from "../../../src/onevice/db/supabase.js";
+import { getValidToolNames } from "../../../src/onevice/agents/factory.js";
 
 type QueryRequest = {
   message: string;
@@ -31,6 +40,8 @@ type AgentCreateRequest = {
   model_preference?: string;
   temperature?: number;
 };
+
+const VALID_AGENT_TYPES = new Set(["sales", "talent", "bidding", "custom"]);
 
 export function createQueryHandler(logger: PluginLogger) {
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
@@ -151,8 +162,7 @@ export function createStatusHandler(logger: PluginLogger) {
   };
 }
 
-// Agent CRUD handlers (Phase 4 - per-user agents)
-// For now these are stubbed; Phase 4 will connect them to Supabase user_agents table
+// Agent CRUD handlers (Phase 4 - per-user agents, wired to Supabase)
 
 export function createListAgentsHandler(logger: PluginLogger) {
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
@@ -161,11 +171,21 @@ export function createListAgentsHandler(logger: PluginLogger) {
       return;
     }
 
-    const userCtx = parseUserContext(req);
-    logger.info(`[onevice] List agents for user: ${userCtx?.user_id ?? "unknown"}`);
+    const userId = getUserIdFromRequest(req);
+    if (!userId) {
+      sendError(res, "Missing user ID (X-User-Context or X-User-Id header required)", 400);
+      return;
+    }
 
-    // Stub: return empty list until Phase 4 connects Supabase
-    sendJson(res, []);
+    logger.info(`[onevice] List agents for user: ${userId}`);
+
+    try {
+      const agents = await listUserAgents(userId);
+      sendJson(res, agents);
+    } catch (e) {
+      logger.error(`[onevice] Failed to list agents: ${e}`);
+      sendError(res, `Failed to list agents: ${e}`, 500);
+    }
   };
 }
 
@@ -176,31 +196,58 @@ export function createCreateAgentHandler(logger: PluginLogger) {
       return;
     }
 
+    const userId = getUserIdFromRequest(req);
+    if (!userId) {
+      sendError(res, "Missing user ID (X-User-Context or X-User-Id header required)", 400);
+      return;
+    }
+
     const body = await readJsonBody<AgentCreateRequest>(req);
     if (!body?.agent_name || !body?.agent_type) {
       sendError(res, "Missing required fields: agent_name, agent_type", 400);
       return;
     }
 
-    const userCtx = parseUserContext(req);
-    logger.info(`[onevice] Create agent "${body.agent_name}" for user: ${userCtx?.user_id ?? "unknown"}`);
+    // Validate agent_type
+    if (!VALID_AGENT_TYPES.has(body.agent_type)) {
+      sendError(res, `Invalid agent_type: ${body.agent_type}. Must be one of: sales, talent, bidding, custom`, 400);
+      return;
+    }
 
-    // Stub: echo back as created until Phase 4
-    const agent = {
-      id: crypto.randomUUID(),
-      user_id: userCtx?.user_id ?? "unknown",
-      agent_name: body.agent_name,
-      agent_type: body.agent_type,
-      system_prompt: body.system_prompt ?? null,
-      tools_enabled: body.tools_enabled ?? [],
-      model_preference: body.model_preference ?? "together/meta-llama/Llama-3.3-70B-Instruct-Turbo",
-      temperature: body.temperature ?? 0.7,
-      is_active: true,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
+    // Validate tools_enabled
+    if (body.tools_enabled && body.tools_enabled.length > 0) {
+      const validNames = new Set(getValidToolNames());
+      const invalid = body.tools_enabled.filter((t) => !validNames.has(t));
+      if (invalid.length > 0) {
+        sendError(res, `Invalid tool names: ${invalid.join(", ")}`, 400);
+        return;
+      }
+    }
 
-    sendJson(res, agent, 201);
+    // Validate temperature
+    if (body.temperature !== undefined && (body.temperature < 0 || body.temperature > 2)) {
+      sendError(res, "Temperature must be between 0 and 2", 400);
+      return;
+    }
+
+    logger.info(`[onevice] Create agent "${body.agent_name}" for user: ${userId}`);
+
+    try {
+      const agent = await createUserAgent({
+        user_id: userId,
+        agent_name: body.agent_name,
+        agent_type: body.agent_type as AgentType,
+        system_prompt: body.system_prompt,
+        tools_enabled: body.tools_enabled ?? [],
+        model_preference: body.model_preference ?? "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        temperature: body.temperature ?? 0.7,
+        is_active: true,
+      });
+      sendJson(res, agent, 201);
+    } catch (e) {
+      logger.error(`[onevice] Failed to create agent: ${e}`);
+      sendError(res, `Failed to create agent: ${e}`, 500);
+    }
   };
 }
 
@@ -211,15 +258,70 @@ export function createUpdateAgentHandler(logger: PluginLogger) {
       return;
     }
 
+    const userId = getUserIdFromRequest(req);
+    if (!userId) {
+      sendError(res, "Missing user ID (X-User-Context or X-User-Id header required)", 400);
+      return;
+    }
+
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     const parts = url.pathname.split("/").filter(Boolean);
-    const agentId = parts[2] ?? "unknown";
+    const agentId = parts[2] ?? "";
+
+    if (!agentId) {
+      sendError(res, "Missing agent ID in URL path", 400);
+      return;
+    }
+
+    // Ownership check
+    const existing = await getUserAgent(agentId);
+    if (!existing) {
+      sendError(res, "Agent not found", 404);
+      return;
+    }
+    if (existing.user_id !== userId) {
+      sendError(res, "Forbidden: agent belongs to another user", 403);
+      return;
+    }
 
     const body = await readJsonBody<Partial<AgentCreateRequest>>(req);
-    logger.info(`[onevice] Update agent ${agentId}`);
+    if (!body) {
+      sendError(res, "Invalid request body", 400);
+      return;
+    }
 
-    // Stub response
-    sendJson(res, { id: agentId, ...body, updated_at: new Date().toISOString() });
+    // Validate tools_enabled if provided
+    if (body.tools_enabled && body.tools_enabled.length > 0) {
+      const validNames = new Set(getValidToolNames());
+      const invalid = body.tools_enabled.filter((t) => !validNames.has(t));
+      if (invalid.length > 0) {
+        sendError(res, `Invalid tool names: ${invalid.join(", ")}`, 400);
+        return;
+      }
+    }
+
+    // Validate temperature if provided
+    if (body.temperature !== undefined && (body.temperature < 0 || body.temperature > 2)) {
+      sendError(res, "Temperature must be between 0 and 2", 400);
+      return;
+    }
+
+    logger.info(`[onevice] Update agent ${agentId} for user: ${userId}`);
+
+    try {
+      const updated = await updateUserAgent(agentId, {
+        ...(body.agent_name !== undefined && { agent_name: body.agent_name }),
+        ...(body.agent_type !== undefined && { agent_type: body.agent_type as AgentType }),
+        ...(body.system_prompt !== undefined && { system_prompt: body.system_prompt }),
+        ...(body.tools_enabled !== undefined && { tools_enabled: body.tools_enabled }),
+        ...(body.model_preference !== undefined && { model_preference: body.model_preference }),
+        ...(body.temperature !== undefined && { temperature: body.temperature }),
+      });
+      sendJson(res, updated);
+    } catch (e) {
+      logger.error(`[onevice] Failed to update agent: ${e}`);
+      sendError(res, `Failed to update agent: ${e}`, 500);
+    }
   };
 }
 
@@ -230,12 +332,40 @@ export function createDeleteAgentHandler(logger: PluginLogger) {
       return;
     }
 
+    const userId = getUserIdFromRequest(req);
+    if (!userId) {
+      sendError(res, "Missing user ID (X-User-Context or X-User-Id header required)", 400);
+      return;
+    }
+
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     const parts = url.pathname.split("/").filter(Boolean);
-    const agentId = parts[2] ?? "unknown";
+    const agentId = parts[2] ?? "";
 
-    logger.info(`[onevice] Delete agent ${agentId}`);
+    if (!agentId) {
+      sendError(res, "Missing agent ID in URL path", 400);
+      return;
+    }
 
-    sendJson(res, { id: agentId, is_active: false, deactivated_at: new Date().toISOString() });
+    // Ownership check
+    const existing = await getUserAgent(agentId);
+    if (!existing) {
+      sendError(res, "Agent not found", 404);
+      return;
+    }
+    if (existing.user_id !== userId) {
+      sendError(res, "Forbidden: agent belongs to another user", 403);
+      return;
+    }
+
+    logger.info(`[onevice] Delete agent ${agentId} for user: ${userId}`);
+
+    try {
+      await deactivateUserAgent(agentId);
+      sendJson(res, { id: agentId, is_active: false, deactivated_at: new Date().toISOString() });
+    } catch (e) {
+      logger.error(`[onevice] Failed to deactivate agent: ${e}`);
+      sendError(res, `Failed to deactivate agent: ${e}`, 500);
+    }
   };
 }

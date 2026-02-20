@@ -39,6 +39,14 @@ export function parseUserContext(req: IncomingMessage): UserContext | null {
   }
 }
 
+export function getUserIdFromRequest(req: IncomingMessage): string | null {
+  const ctx = parseUserContext(req);
+  if (ctx?.user_id) return ctx.user_id;
+  const header = req.headers["x-user-id"];
+  if (typeof header === "string" && header.length > 0) return header;
+  return null;
+}
+
 export function sendUnauthorized(res: ServerResponse, message = "Unauthorized"): void {
   res.writeHead(401, { "Content-Type": "application/json" });
   res.end(JSON.stringify({ error: message }));
